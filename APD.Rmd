@@ -1,0 +1,257 @@
+---
+title: "Austin Police Department - Incident Extract"
+author: "Hunter Ratliff"
+date: "October 18, 2015"
+output: html_document
+---
+```{r, include=FALSE}
+setwd("~/Google Drive/100 - Publicly hosted/rootR/APD Reports")
+```
+
+
+
+## Load packages
+First we'll load the packages   
+   
+```{r Load packages, echo=FALSE, warning=F, message=F}
+
+# Read them
+sapply(c("ggplot2", "dplyr", "lubridate", "reshape2", "magrittr", "stringi", 
+         "tidyr", "ggmap", "ggthemes", "scales", "RSocrata"), require, character.only=TRUE) 
+
+# Required packages
+sapply(c("dplyr", "lubridate", "reshape2", "RSocrata"), require, character.only=TRUE)  
+
+```
+
+# API calls
+Using the <https://data.austintexas.gov> & the Socrata API, we'll pull some data from Austin Police Department (APD)
+## APD INCIDENT EXTRACT YTD 
+Dataset for the last 18 months. See description on [APD Incidents webpage](https://data.austintexas.gov/Public-Safety/APD-Incident-Extract-YTD/b4y9-5x39) for more details.
+```{r APD_YTD API, eval=FALSE}
+APD_YTD <- RSocrata::read.socrata("https://data.austintexas.gov/resource/b4y9-5x39.csv")
+write.csv(x=APD_YTD, file = "data/APD_YTD.csv")
+```
+
+
+## MUNICIPAL COURT CASELOAD INFORMATION
+This data is provided to help with analysis of various violations charged throughout the City of Austin. See [Court Cases webpage](https://data.austintexas.gov/Public-Safety/Municipal-Court-Caseload-Information-Dataset-remov/8jyt-x94k) for more details.
+```{r CourtData API, eval=FALSE}
+CourtData <- RSocrata::read.socrata("https://data.austintexas.gov/resource/8jyt-x94k.csv")
+write.csv(x=CourtData, file = "data/CourtData.csv")
+```
+
+
+
+Select the columns that are of interest to us, and create a factor for the 'Crime' variable. The result is a data frame called 'APD'
+```{r format Court}
+# Load data set
+CourtData <- read.csv("data/CourtData.csv")
+
+# Format Dates
+Court <- mutate(CourtData, 
+       Offense.Date = ymd(Offense.Date),
+       Offense.Time = hms(Offense.Time))
+
+# Make lowercase
+Court <- mutate(Court,
+       Offense.Charge.Description = stri_trans_totitle(Offense.Charge.Description),
+       Offense.Street.Name        = stri_trans_totitle(Offense.Street.Name),
+       Offense.Cross.Street.Name  = stri_trans_totitle(Offense.Cross.Street.Name))
+
+# Rename
+Court <- rename(Court, Case.Type=Offense.Case.Type, Date=Offense.Date, Time=Offense.Time, Charge=Offense.Charge.Description, Street=Offense.Street.Name, CrossStreet=Offense.Cross.Street.Name)
+
+# Make factors
+Court$Charge <- factor(Court$Charge)
+Court$Street <- factor(Court$Street)
+Court$CrossStreet <- factor(Court$CrossStreet)
+
+# Preview
+head(Court)
+```
+
+
+```{r format APD}
+# Load data set
+APD_YTD   <- read.csv("data/APD_YTD.csv")
+
+# Format Dates
+APD <- mutate(APD_YTD, Date = mdy(Date) + hours(Time %/% 100) + minutes(Time-((Time %/% 100)*100)))
+
+# Make lowercase
+APD <- mutate(APD,
+       Crime.Type = stri_trans_totitle(Crime.Type),
+       ADDRESS    = stri_trans_totitle(ADDRESS))
+    
+# Rename
+APD <- rename(APD, Location.Type=LOCATION_TYPE, Address=ADDRESS, lon=LONGITUDE, lat=LATITUDE, IRN=Incident.Report.Number)   
+
+# Make factors
+APD$Crime.Type <- factor(APD$Crime.Type)
+APD$Address    <- factor(APD$Address)
+
+# Preview
+head(APD)
+# murder, rape, robbery, aggravated assault, burglary, theft, auto theft, and arson
+```
+
+
+---
+   
+```{r}
+df = reshape2::dcast(Court, formula = Charge ~ Officer.Code, fun.aggregate = length)
+row.names(df) <- df$Charge
+df$Charge <- NULL
+
+# Determine number of clusters
+wss <- (nrow(df)-1)*sum(apply(df,2,var))
+for (i in 2:15) wss[i] <- sum(kmeans(df, 
+  	centers=i)$withinss)
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+  ylab="Within groups sum of squares")
+
+
+
+
+
+CourtCharge = reshape2::dcast(Court, formula = Charge ~ Officer.Code, 
+                              fun.aggregate = length, 
+                              margins = c("Charge", "Officer.Code"))
+officer = melt(CourtCharge, id.vars = "Charge", variable.name = "Officer.Code") %>% filter(value>0, value < 1e+05 )
+officer$Officer.Code <- factor(officer$Officer.Code)
+qplot(data=officer, x=Charge, y=Officer.Code, alpha=value, fill=value, geom="tile")
+qplot(data=officer, x=Charge, y=value, alpha=value, position = "jitter") + #fill=Officer.Code) 
+   scale_y_sqrt() + coord_flip() 
+
+```
+
+
+```{r}
+# Split by first word
+APD.type = separate(APD, col = Crime.Type, sep = " ",   into = c("Crime", "Crime.Sub.Type"), fill = "right", extra="merge", remove = FALSE)
+
+# Factor
+APD.type$Crime          <- factor(APD.type$Crime)            # unique(APD.type$Crime)
+APD.type$Crime.Sub.Type <- factor(APD.type$Crime.Sub.Type)   # unique(APD.type$Crime.Sub.Type)
+
+# Cumsum the frame
+APD.type = mutate(APD.type, Date=as.Date(Date)) %>%
+  filter(Date > as.Date(ymd("2015-01-01"))) %>%
+  group_by(Crime.Type, Date) %>% mutate(Count=n()) %>% ungroup()
+
+## PLOT 1
+## Showing biggest problems
+group_by(APD.type, wk=week(Date), Crime.Type) %>%
+  summarise(num=n()) %>% ungroup() %>%
+  group_by(Crime.Type) %>% 
+  mutate(
+    cumsum  = order_by(wk, cumsum(num)),
+    density = cumsum / sum(num),
+    Sum              = sum(num)) %>% ungroup() %>%
+  mutate(percentRank = percent_rank(Sum)) %>%
+
+  filter(percentRank>0.75) %>%
+  ggplot(aes(x=Crime.Type, y=wk)) + 
+  geom_point(aes(size=Sum), alpha=I(0.2)) +
+  geom_point(aes(size=cumsum))+ coord_flip()
+
+## PLOT 2
+## Showing over time
+df2 = group_by(APD.type, Crime.Type, Date) %>% summarise(calls = n()) %>%
+  group_by(Crime.Type, week.Date=week(Date))  %>% mutate(week.calls = sum(calls)) %>% ungroup() %>%
+  group_by(Crime.Type, month.Date=month(Date)) %>% mutate(month.calls = sum(calls)) %>% ungroup() %>%
+  group_by(Crime.Type)                      %>% 
+  mutate(
+    all.calls           = sum(calls),
+    calls.density       = calls / sum(calls),
+    week.calls.density  = week.calls / sum(calls),
+    month.calls.density = month.calls / sum(calls),
+    calls.cumsum        = order_by(Date, cumsum(calls)),
+    calls.cumsum.density= order_by(Date, cumsum(calls)) / sum(calls)) %>% ungroup() %>%
+  mutate(
+    rank = dense_rank(all.calls),
+    rank  = max(rank)+1-rank)
+  
+# Plot 2.1
+group_by(df2, Crime.Type) %>% filter(rank <50) %>% 
+  ggplot(aes(x=Date, y=Crime.Type, group=Crime.Type)) +
+  # geom_tile(aes(alpha=calls.density, fill=calls)) + 
+  geom_tile(aes(alpha=week.calls.density, fill=week.calls)) +
+  # geom_tile(aes(alpha=month.calls.density, fill=month.calls)) +
+  scale_fill_continuous(low="yellow", high="blue") + theme_fivethirtyeight()
+
+# Plot 2.2
+group_by(df2, Crime.Type) %>% filter(rank <50) %>% 
+  ggplot(aes(x=Date, y=calls.cumsum.density, color=Crime.Type)) + 
+  geom_jitter(aes(size=all.calls), alpha=I(0.2), color=I("grey")) +
+  geom_jitter(aes(size=calls.cumsum), alpha=I(0.8), color=I("grey")) +
+  geom_line(aes(group=Crime.Type, size=all.calls)) + theme_hc()
+  
+# Plot 2.3
+group_by(df2, Crime.Type) %>% filter(rank <50) %>% 
+  ggplot(aes(x=Date, y=calls.cumsum, color=Crime.Type)) + 
+  geom_jitter(aes(size=all.calls), alpha=I(0.2), color=I("grey")) +
+  geom_jitter(aes(size=calls.cumsum), alpha=I(0.8), color=I("grey")) +
+  geom_line(aes(group=Crime.Type, size=all.calls), color=I("grey")) + 
+  geom_line(aes(group=Crime.Type)) + theme_hc()
+
+
+#   
+#   
+  # ggplot(filter(df2, rank<20), aes(x=Crime, y=Crime.Sub.Type, fill=rank)) + geom_text(aes(label=Crime.Type, alpha=Incident.perank)) + coord_flip()
+  
+  
+  # ggplot(filter(APD.type, Incident.perank>0.05), aes(x=Date, group=Crime, color=Crime)) + geom_point(aes(y=Incident.density), alpha=I(0.1)) + geom_line(aes(y=Incident.density), alpha=I(0.2)) #+ theme_economist_white()
+  
+  # ggplot(APD.type, aes(x=Date, group=Crime)) + geom_point(aes(y=Incident.cumsum, color=Crime), alpha=I(0.1)) + geom_line(aes(y=Incident.cumsum, color=Crime), alpha=I(0.2)) + geom_text(aes(x=max(Date), y=max(Incident.cumsum), label=Crime)) + theme_economist_white()
+```
+# Crimes reported this year
+
+### High-level
+Crimes occuring greater than 1000 times this year   
+```{r Fig1-high, fig.align='center', fig.height=19.5, fig.width=12.5, eval=F}
+APD %>% group_by(Crime.Type) %>% 
+  mutate(number_of_calls = n()) %>% arrange(desc(number_of_calls)) %>%
+  filter(number_of_calls > 1000, year(Date) == 2015 ) %>%
+  ggplot(aes(x=Crime.Type, y=Date, group=Crime.Type, fill=number_of_calls)) + 
+  geom_violin(alpha=I(0.75)) + geom_point(alpha=I(0.75), size=I(0.1)) + 
+  coord_flip() + theme_fivethirtyeight() + scale_fill_continuous(low="yellow", high = "red")
+
+```
+
+### Mid-level
+Crimes occuring between 500 and 1000 times this year   
+```{r Fig1-mid, fig.align='center', fig.height=7.5, fig.width=12.5, eval=F}
+APD %>% group_by(Crime) %>% 
+  mutate(number_of_calls = n()) %>% arrange(desc(number_of_calls)) %>%
+  filter(number_of_calls < 1000, number_of_calls > 500, year(Date) == 2015 ) %>%
+  ggplot(aes(x=Crime, y=Date, group=Crime, fill=number_of_calls)) + 
+  geom_violin(alpha=I(0.75)) + geom_point(alpha=I(0.75), size=I(0.1)) + 
+  coord_flip() + theme_fivethirtyeight() + scale_fill_continuous(low="yellow", high = "red")
+
+```
+
+### Low-level
+Crimes occuring between 100 and 500 times this year   
+```{r Fig1-low, fig.align='center', fig.height=27.5, fig.width=12.5, eval=F}
+APD %>% group_by(Crime) %>% 
+  mutate(number_of_calls = n()) %>% arrange(desc(number_of_calls)) %>%
+  filter(number_of_calls < 500, number_of_calls > 100, year(Date) == 2015 ) %>%
+  ggplot(aes(x=Crime, y=Date, group=Crime, fill=number_of_calls)) + 
+  geom_violin(alpha=I(0.75)) + geom_point(alpha=I(0.75), size=I(0.1)) + 
+  coord_flip() + theme_fivethirtyeight() + scale_fill_continuous(low="yellow", high = "red")
+
+```
+
+
+```{r}
+# require(igraph)
+# https://rulesofreason.wordpress.com/2012/11/05/network-visualization-in-r-with-the-igraph-package/
+# df = select(Court, Officer.Code, Charge, Agency.Code, Case.Type)
+# g = graph_from_data_frame(df)
+# plot(g)
+
+# g = graph_from_data_frame(select(Court, Agency.Code, Case.Type))
+# plot(g)
+```
